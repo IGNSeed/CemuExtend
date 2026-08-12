@@ -465,19 +465,25 @@ bool CemodRuntime::Invoke(std::uint64_t handle, CemodLifecycle lifecycle,
 
 bool CemodRuntime::Unload(std::uint64_t handle)
 {
-	bool unloaded{};
-	const bool ran = coreinit::OSRunOnEmulatedCpuThreadQuiesced([this, handle, &unloaded] {
-		unloaded = UnloadQuiesced(handle);
-	});
-	return ran && unloaded;
-}
-
-bool CemodRuntime::UnloadQuiesced(std::uint64_t handle)
-{
 	if ((handle & Impl::kWupsHandleMask) != 0)
 		return m_impl->wups && m_impl->wups->Unload(handle & ~Impl::kWupsHandleMask);
 	if ((handle & Impl::kTrustedHandleMask) != 0)
-		return m_impl->trusted.Unload(handle & ~Impl::kTrustedHandleMask);
+	{
+		const auto trustedHandle = handle & ~Impl::kTrustedHandleMask;
+		bool prepared{};
+		const bool quiesced = coreinit::OSRunOnEmulatedCpuThreadQuiesced(
+			[this, trustedHandle, &prepared] {
+				prepared = m_impl->trusted.PrepareUnload(trustedHandle);
+			});
+		if (!quiesced || !prepared)
+			return false;
+		bool finished{};
+		const bool ran = coreinit::OSRunOnEmulatedCpuThread(
+			[this, trustedHandle, &finished] {
+				finished = m_impl->trusted.FinishUnload(trustedHandle);
+			});
+		return ran && finished;
+	}
 	(void)Invoke(handle, CemodLifecycle::Shutdown);
 	std::lock_guard lock(m_impl->mutex);
 	const auto found = m_impl->mods.find(handle);
@@ -594,13 +600,6 @@ void CemodRuntime::UpdateTitlePermissions(const ModServicePermissions& services)
 
 void CemodRuntime::UnloadAll()
 {
-	if (!coreinit::OSRunOnEmulatedCpuThreadQuiesced([this] { UnloadAllQuiesced(); }))
-		cemuLog_log(LogType::Force,
-			"CemuExtend could not acquire guest execution quiescence for Mod unload");
-}
-
-void CemodRuntime::UnloadAllQuiesced()
-{
 	for (;;)
 	{
 		std::uint64_t handle{};
@@ -609,9 +608,13 @@ void CemodRuntime::UnloadAllQuiesced()
 			if (m_impl->mods.empty()) break;
 			handle = m_impl->mods.begin()->first;
 		}
-		(void)UnloadQuiesced(handle);
+		(void)Unload(handle);
 	}
-	m_impl->trusted.UnloadAll();
+	while (const auto handle = m_impl->trusted.LatestHandle())
+	{
+		if (!Unload(Impl::kTrustedHandleMask | *handle))
+			break;
+	}
 	// UnloadChecked() flags a pending application-ends teardown for any plugin that
 	// was still Active/Initialized, so a plain UnloadAll() is a clean title shutdown.
 	if (m_impl->wups) m_impl->wups->UnloadAll();

@@ -19,8 +19,9 @@ public:
 	[[nodiscard]] std::optional<std::uint64_t> Load(CemodPackage package,
 		std::uint32_t titlePermissions, const ModServicePermissions& services,
 		std::string& error);
-	[[nodiscard]] bool Unload(std::uint64_t handle);
-	void UnloadAll();
+	[[nodiscard]] bool PrepareUnload(std::uint64_t handle);
+	[[nodiscard]] bool FinishUnload(std::uint64_t handle);
+	[[nodiscard]] std::optional<std::uint64_t> LatestHandle() const;
 	void AbandonAllForTitleShutdown();
 	void UpdatePermissions(std::uint32_t permissions, const ModServicePermissions& services);
 
@@ -28,7 +29,7 @@ public:
 	[[nodiscard]] std::size_t Size() const;
 
 private:
-	[[nodiscard]] bool UnloadImpl(std::uint64_t handle, bool invokeShutdown);
+	[[nodiscard]] bool Release(std::uint64_t handle);
 
 	struct Impl;
 	std::unique_ptr<Impl> m_impl;

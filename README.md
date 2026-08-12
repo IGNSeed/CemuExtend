@@ -47,7 +47,7 @@ Mod単位の権限パネルにある「Trust future updates to this Mod」はopt
 
 最初のbranchをELFの`.cemod.bootstrap` sectionにCMB1 tableとして記録します。Cemuはmodule hash、対象命令とmask、handlerの実行segment、REL24範囲、patch競合を検証してから一括適用し、JIT cacheを無効化します。それ以降のhookはMod側C++と`libhookevent`で設置できます。
 
-CMB1 version 1は従来の12-byte headerを維持します。version 2はrecord列の前にshutdown handler addressを追加した16-byte headerです。unload時は全PPC coreの既存guest timesliceを退出させ、新規guest実行を停止してからshutdown handlerを呼び、bootstrap patch復元とcodecave解放を行います。version 1 payloadも同じquiescence下で安全にprimary patchを復元しますが、payload固有の追加hookやresourceを解放する場合はversion 2を使用してください。
+CMB1 version 1は従来の12-byte headerを維持します。version 2はrecord列の前にshutdown handler addressを追加した16-byte headerです。handlerは`r3=0`で全PPC core停止中に呼ばれ、追加hookの入口をrevokeします。Cemuがprimary patchを復元してcoreを再開した後、`r3=1`でもう一度呼ばれ、開始済み処理のdrainやGPU待機を含むresource解放を行います。codecaveは第2段階の完了後まで保持されます。version 1 payloadも同じquiescence下で安全にprimary patchを復元しますが、payload固有の追加hookやresourceを解放する場合はversion 2を使用してください。
 
 trusted ELFはASM適用後に`mod_id`順で共有8 MiB codecaveへ配置されます。検証失敗、競合、容量不足では該当Modをロードせず、部分patchを残しません。タイトル終了時は元命令を復元してJITを再無効化し、codecaveとCEX2 sessionを解放します。
 

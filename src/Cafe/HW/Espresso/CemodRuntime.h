@@ -49,9 +49,6 @@ public:
 	[[nodiscard]] cemuextend_hle::Cex2Owner* TrustedOwner();
 
 private:
-	[[nodiscard]] bool UnloadQuiesced(std::uint64_t handle);
-	void UnloadAllQuiesced();
-
 	struct Impl;
 	std::unique_ptr<Impl> m_impl;
 };

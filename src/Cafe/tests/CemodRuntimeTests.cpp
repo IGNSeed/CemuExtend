@@ -289,6 +289,12 @@ uint32 memory_getVirtualOffsetFromPointer(void*) { return 0; }
 
 namespace coreinit
 {
+	bool OSRunOnEmulatedCpuThread(std::function<void()> task, uint32)
+	{
+		if (!task) return false;
+		task();
+		return true;
+	}
 	bool OSRunOnEmulatedCpuThreadQuiesced(std::function<void()> task, uint32)
 	{
 		if (!task) return false;

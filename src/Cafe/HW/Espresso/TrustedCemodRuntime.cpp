@@ -402,6 +402,7 @@ struct TrustedCemodRuntime::Impl
 		std::uint32_t patchAddress{};
 		std::uint32_t originalInstruction{};
 		std::uint32_t shutdownAddress{};
+		bool prepared{};
 	};
 
 	mutable std::mutex mutex;
@@ -413,7 +414,7 @@ struct TrustedCemodRuntime::Impl
 };
 
 TrustedCemodRuntime::TrustedCemodRuntime() : m_impl(std::make_unique<Impl>()) {}
-TrustedCemodRuntime::~TrustedCemodRuntime() { UnloadAll(); }
+TrustedCemodRuntime::~TrustedCemodRuntime() { AbandonAllForTitleShutdown(); }
 
 std::optional<std::uint64_t> TrustedCemodRuntime::Load(CemodPackage package,
 	std::uint32_t titlePermissions, const ModServicePermissions& services, std::string& error)
@@ -532,27 +533,54 @@ std::optional<std::uint64_t> TrustedCemodRuntime::Load(CemodPackage package,
 	return handle;
 }
 
-bool TrustedCemodRuntime::Unload(std::uint64_t handle)
-{
-	return UnloadImpl(handle, true);
-}
-
-bool TrustedCemodRuntime::UnloadImpl(std::uint64_t handle, bool invokeShutdown)
+bool TrustedCemodRuntime::PrepareUnload(std::uint64_t handle)
 {
 	std::lock_guard lock(m_impl->mutex);
 	const auto found = m_impl->mods.find(handle);
 	if (found == m_impl->mods.end()) return false;
-	if (invokeShutdown && found->second.shutdownAddress != 0)
+	if (found->second.prepared) return true;
+	if (found->second.shutdownAddress != 0)
 	{
-		// shutdownはgame側heapやGX2 APIを利用し得るため、有効なtitle PPC contextと
-		// 全core quiescenceを確立したCemodRuntime経路からのみ呼び出す。
+		// phase 0は全core停止中に実行する。追加hookの入口を復元するだけで、
+		// schedulerをyieldし得るdrainやGPU待機はphase 1へ分離する。
 		if (PPCInterpreter_getCurrentInstance() == nullptr)
 			return false;
-		PPCCoreCallback(found->second.shutdownAddress);
+		PPCCoreCallback(found->second.shutdownAddress, 0U);
 	}
 	Write32(found->second.patchAddress, found->second.originalInstruction);
 	PPCRecompiler_invalidateRange(found->second.patchAddress, found->second.patchAddress + 4);
 	m_impl->patchAddresses.erase(found->second.patchAddress);
+	found->second.prepared = true;
+	return true;
+}
+
+bool TrustedCemodRuntime::FinishUnload(std::uint64_t handle)
+{
+	std::lock_guard lock(m_impl->mutex);
+	const auto found = m_impl->mods.find(handle);
+	if (found == m_impl->mods.end() || !found->second.prepared) return false;
+	if (found->second.shutdownAddress != 0)
+	{
+		// phase 1はentryを全てrevokeした後に通常のguest scheduler上で実行する。
+		// hook内処理のdrainやGX2待機でyieldしても、payloadへ新規流入は起きない。
+		if (PPCInterpreter_getCurrentInstance() == nullptr)
+			return false;
+		PPCCoreCallback(found->second.shutdownAddress, 1U);
+	}
+	return Release(handle);
+}
+
+bool TrustedCemodRuntime::Release(std::uint64_t handle)
+{
+	const auto found = m_impl->mods.find(handle);
+	if (found == m_impl->mods.end()) return false;
+	if (!found->second.prepared)
+	{
+		Write32(found->second.patchAddress, found->second.originalInstruction);
+		PPCRecompiler_invalidateRange(found->second.patchAddress,
+			found->second.patchAddress + 4);
+		m_impl->patchAddresses.erase(found->second.patchAddress);
+	}
 	RPLLoader_ReleaseCodeCaveMem(found->second.allocation);
 	m_impl->mods.erase(found);
 	if (m_impl->mods.empty() && m_impl->owner)
@@ -564,19 +592,11 @@ bool TrustedCemodRuntime::UnloadImpl(std::uint64_t handle, bool invokeShutdown)
 	return true;
 }
 
-void TrustedCemodRuntime::UnloadAll()
+std::optional<std::uint64_t> TrustedCemodRuntime::LatestHandle() const
 {
-	for (;;)
-	{
-		std::uint64_t handle{};
-		{
-			std::lock_guard lock(m_impl->mutex);
-			if (m_impl->mods.empty()) break;
-			handle = m_impl->mods.rbegin()->first;
-		}
-		if (!Unload(handle))
-			break;
-	}
+	std::lock_guard lock(m_impl->mutex);
+	if (m_impl->mods.empty()) return std::nullopt;
+	return m_impl->mods.rbegin()->first;
 }
 
 void TrustedCemodRuntime::AbandonAllForTitleShutdown()
@@ -589,7 +609,8 @@ void TrustedCemodRuntime::AbandonAllForTitleShutdown()
 			if (m_impl->mods.empty()) break;
 			handle = m_impl->mods.rbegin()->first;
 		}
-		if (!UnloadImpl(handle, false))
+		std::lock_guard lock(m_impl->mutex);
+		if (!Release(handle))
 			break;
 	}
 }

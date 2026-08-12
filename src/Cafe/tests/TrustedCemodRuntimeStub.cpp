@@ -12,8 +12,9 @@ std::optional<std::uint64_t> TrustedCemodRuntime::Load(CemodPackage,
 	return std::nullopt;
 }
 
-bool TrustedCemodRuntime::Unload(std::uint64_t) { return false; }
-void TrustedCemodRuntime::UnloadAll() {}
+bool TrustedCemodRuntime::PrepareUnload(std::uint64_t) { return false; }
+bool TrustedCemodRuntime::FinishUnload(std::uint64_t) { return false; }
+std::optional<std::uint64_t> TrustedCemodRuntime::LatestHandle() const { return std::nullopt; }
 void TrustedCemodRuntime::AbandonAllForTitleShutdown() {}
 void TrustedCemodRuntime::UpdatePermissions(std::uint32_t, const ModServicePermissions&) {}
 cemuextend_hle::Cex2Owner* TrustedCemodRuntime::Owner() { return nullptr; }
