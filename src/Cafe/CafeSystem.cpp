@@ -1123,10 +1123,11 @@ namespace CafeSystem
 		{
 			cemuLog_log(LogType::Force,
 				"CemuExtend could not run title shutdown callbacks on an emulated CPU; "
-				"title-wide RPL cleanup will discard the remaining modules");
-			cemuextend_hle::GetCemodRuntime().AbandonAllForTitleShutdown();
+				"remaining modules will be discarded after the PPC scheduler stops");
 		}
 		coreinit::OSSchedulerEnd();
+		if (!modsUnloaded)
+			cemuextend_hle::GetCemodRuntime().AbandonAllForTitleShutdown();
 		Latte_Stop();
 		// reset Cafe OS userspace modules
 		snd_core::reset();

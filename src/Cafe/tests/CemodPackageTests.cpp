@@ -48,14 +48,15 @@ std::vector<std::byte> Elf()
 }
 
 std::vector<std::byte> TrustedElf(bool writableExecutable = false, bool missingBootstrap = false,
-	std::optional<std::uint8_t> relocationType = std::nullopt)
+	std::optional<std::uint8_t> relocationType = std::nullopt,
+	bool lifecycleBootstrap = false)
 {
 	constexpr std::uint32_t namesOffset = 84;
 	constexpr std::string_view names{"\0.shstrtab\0.cemod.bootstrap\0.dynsym\0.rela.dyn\0", 47};
 	constexpr std::uint32_t bootstrapOffset = 132;
-	constexpr std::uint32_t symbolOffset = 168;
-	constexpr std::uint32_t relocationOffset = 184;
-	constexpr std::uint32_t sectionsOffset = 196;
+	constexpr std::uint32_t symbolOffset = 176;
+	constexpr std::uint32_t relocationOffset = 192;
+	constexpr std::uint32_t sectionsOffset = 204;
 	const std::uint16_t sectionCount = relocationType ? 5 : 3;
 	std::vector<std::byte> elf(sectionsOffset + sectionCount * 40);
 	elf[0] = std::byte{0x7f}; elf[1] = std::byte{'E'}; elf[2] = std::byte{'L'}; elf[3] = std::byte{'F'};
@@ -68,18 +69,23 @@ std::vector<std::byte> TrustedElf(bool writableExecutable = false, bool missingB
 	Be32(elf, 68, elf.size()); Be32(elf, 72, elf.size());
 	Be32(elf, 76, writableExecutable ? 7 : 5); Be32(elf, 80, 16);
 	std::memcpy(elf.data() + namesOffset, names.data(), names.size());
-	Be32(elf, bootstrapOffset, 0x434d4231); Be16(elf, bootstrapOffset + 4, 1);
+	const std::uint32_t bootstrapHeaderSize = lifecycleBootstrap ? 16 : 12;
+	const std::uint32_t firstRecord = bootstrapOffset + bootstrapHeaderSize;
+	Be32(elf, bootstrapOffset, 0x434d4231);
+	Be16(elf, bootstrapOffset + 4, lifecycleBootstrap ? 2 : 1);
 	Be16(elf, bootstrapOffset + 6, 24); Be32(elf, bootstrapOffset + 8, 1);
-	Be32(elf, bootstrapOffset + 12, 0x867317de); Be32(elf, bootstrapOffset + 16, 0x02f37154);
-	Be32(elf, bootstrapOffset + 20, 0x4e800421); Be32(elf, bootstrapOffset + 24, 0xffffffff);
-	Be32(elf, bootstrapOffset + 28, 0); Be32(elf, bootstrapOffset + 32, 0);
+	if (lifecycleBootstrap) Be32(elf, bootstrapOffset + 12, 0x40);
+	Be32(elf, firstRecord, 0x867317de); Be32(elf, firstRecord + 4, 0x02f37154);
+	Be32(elf, firstRecord + 8, 0x4e800421); Be32(elf, firstRecord + 12, 0xffffffff);
+	Be32(elf, firstRecord + 16, 0); Be32(elf, firstRecord + 20, 0);
 	const auto namesSection = sectionsOffset + 40;
 	Be32(elf, namesSection + 4, 3); Be32(elf, namesSection + 16, namesOffset);
 	Be32(elf, namesSection + 20, names.size()); Be32(elf, namesSection + 32, 1);
 	const auto bootstrapSection = sectionsOffset + 80;
 	Be32(elf, bootstrapSection, missingBootstrap ? 1 : 11); Be32(elf, bootstrapSection + 4, 1);
 	Be32(elf, bootstrapSection + 8, 2); Be32(elf, bootstrapSection + 12, bootstrapOffset);
-	Be32(elf, bootstrapSection + 16, bootstrapOffset); Be32(elf, bootstrapSection + 20, 36);
+	Be32(elf, bootstrapSection + 16, bootstrapOffset);
+	Be32(elf, bootstrapSection + 20, bootstrapHeaderSize + 24);
 	Be32(elf, bootstrapSection + 32, 4);
 	if (relocationType)
 	{
@@ -93,7 +99,7 @@ std::vector<std::byte> TrustedElf(bool writableExecutable = false, bool missingB
 		Be32(elf, relocationSection + 8, 2); Be32(elf, relocationSection + 16, relocationOffset);
 		Be32(elf, relocationSection + 20, 12); Be32(elf, relocationSection + 24, 3);
 		Be32(elf, relocationSection + 32, 4); Be32(elf, relocationSection + 36, 12);
-		Be32(elf, relocationOffset, bootstrapOffset + 28);
+		Be32(elf, relocationOffset, firstRecord + 16);
 		Be32(elf, relocationOffset + 4, *relocationType);
 	}
 	return elf;
@@ -254,6 +260,12 @@ void TestTrustedValidation()
 	auto path = PackagePath("trusted-valid");
 	WritePackage(path, false, kTrustedManifest, TrustedElf());
 	auto package = CemodPackage::Load(path, 0x0005000012345678ULL, error);
+	CHECK(package && package->IsTrustedNative());
+	std::filesystem::remove(path);
+
+	path = PackagePath("trusted-lifecycle-bootstrap");
+	WritePackage(path, false, kTrustedManifest, TrustedElf(false, false, std::nullopt, true));
+	package = CemodPackage::Load(path, 0x0005000012345678ULL, error);
 	CHECK(package && package->IsTrustedNative());
 	std::filesystem::remove(path);
 

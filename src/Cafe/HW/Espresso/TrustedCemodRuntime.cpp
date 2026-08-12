@@ -2,6 +2,8 @@
 
 #include "Cafe/HW/Espresso/TrustedCemodRuntime.h"
 
+#include "Cafe/HW/Espresso/PPCCallback.h"
+#include "Cafe/HW/Espresso/PPCState.h"
 #include "Cafe/HW/Espresso/Recompiler/PPCRecompiler.h"
 #include "Cafe/HW/MMU/MMU.h"
 #include "Cafe/OS/RPL/rpl.h"
@@ -17,8 +19,11 @@
 namespace
 {
 	constexpr std::uint32_t kBootstrapMagic = 0x434d4231U; // CMB1
-	constexpr std::uint16_t kBootstrapVersion = 1;
+	constexpr std::uint16_t kBootstrapVersion1 = 1;
+	constexpr std::uint16_t kBootstrapVersion2 = 2;
 	constexpr std::uint16_t kBootstrapRecordSize = 24;
+	constexpr std::uint32_t kBootstrapV1HeaderSize = 12;
+	constexpr std::uint32_t kBootstrapV2HeaderSize = 16;
 	constexpr std::uint32_t kMaximumImageSize = MEMORY_CODECAVEAREA_SIZE;
 
 	std::uint16_t U16(std::span<const std::byte> bytes, std::size_t offset)
@@ -396,6 +401,7 @@ struct TrustedCemodRuntime::Impl
 		std::uint32_t allocationSize{};
 		std::uint32_t patchAddress{};
 		std::uint32_t originalInstruction{};
+		std::uint32_t shutdownAddress{};
 	};
 
 	mutable std::mutex mutex;
@@ -448,12 +454,23 @@ std::optional<std::uint64_t> TrustedCemodRuntime::Load(CemodPackage package,
 
 	const auto& bootstrapSection = parsed.sections[parsed.bootstrapSection];
 	const auto bootstrapAddress = loadBias + bootstrapSection.address;
-	if (Read32(bootstrapAddress) != kBootstrapMagic || Read16(bootstrapAddress + 4) != kBootstrapVersion ||
+	const auto bootstrapVersion = Read16(bootstrapAddress + 4);
+	if (Read32(bootstrapAddress) != kBootstrapMagic ||
+		(bootstrapVersion != kBootstrapVersion1 && bootstrapVersion != kBootstrapVersion2) ||
 		Read16(bootstrapAddress + 6) != kBootstrapRecordSize)
 		{ error = "invalid CMB1 bootstrap header"; release(); return std::nullopt; }
+	const auto bootstrapHeaderSize = bootstrapVersion == kBootstrapVersion2 ?
+		kBootstrapV2HeaderSize : kBootstrapV1HeaderSize;
 	const auto recordCount = Read32(bootstrapAddress + 8);
-	if (recordCount == 0 || recordCount > 64 || bootstrapSection.size != 12U + recordCount * kBootstrapRecordSize)
+	if (recordCount == 0 || recordCount > 64 ||
+		bootstrapSection.size != bootstrapHeaderSize + recordCount * kBootstrapRecordSize)
 		{ error = "invalid CMB1 bootstrap record count"; release(); return std::nullopt; }
+	const auto shutdownAddress = bootstrapVersion == kBootstrapVersion2 ?
+		Read32(bootstrapAddress + 12) : 0U;
+	if (bootstrapVersion == kBootstrapVersion2 &&
+		(shutdownAddress < loadBias ||
+			!IsExecutableAddress(parsed, shutdownAddress - loadBias)))
+		{ error = "invalid CMB1 shutdown handler"; release(); return std::nullopt; }
 
 	std::optional<std::pair<const RPLModule*, std::uint32_t>> match;
 	std::uint32_t handlerVirtual{};
@@ -461,7 +478,8 @@ std::optional<std::uint64_t> TrustedCemodRuntime::Load(CemodPackage package,
 	std::uint32_t mask{};
 	for (std::uint32_t record = 0; record < recordCount; ++record)
 	{
-		const auto address = bootstrapAddress + 12 + record * kBootstrapRecordSize;
+		const auto address = bootstrapAddress + bootstrapHeaderSize +
+			record * kBootstrapRecordSize;
 		const auto moduleHash = Read32(address);
 		const auto targetVirtual = Read32(address + 4);
 		const auto recordExpected = Read32(address + 8);
@@ -510,15 +528,28 @@ std::optional<std::uint64_t> TrustedCemodRuntime::Load(CemodPackage package,
 	const auto handle = m_impl->nextHandle++;
 	releaseOnFailure = false;
 	m_impl->mods.emplace(handle, Impl::Instance{std::move(package), allocation,
-		parsed.imageSize, patchAddress, original});
+		parsed.imageSize, patchAddress, original, shutdownAddress});
 	return handle;
 }
 
 bool TrustedCemodRuntime::Unload(std::uint64_t handle)
 {
+	return UnloadImpl(handle, true);
+}
+
+bool TrustedCemodRuntime::UnloadImpl(std::uint64_t handle, bool invokeShutdown)
+{
 	std::lock_guard lock(m_impl->mutex);
 	const auto found = m_impl->mods.find(handle);
 	if (found == m_impl->mods.end()) return false;
+	if (invokeShutdown && found->second.shutdownAddress != 0)
+	{
+		// shutdownはgame側heapやGX2 APIを利用し得るため、有効なtitle PPC contextと
+		// 全core quiescenceを確立したCemodRuntime経路からのみ呼び出す。
+		if (PPCInterpreter_getCurrentInstance() == nullptr)
+			return false;
+		PPCCoreCallback(found->second.shutdownAddress);
+	}
 	Write32(found->second.patchAddress, found->second.originalInstruction);
 	PPCRecompiler_invalidateRange(found->second.patchAddress, found->second.patchAddress + 4);
 	m_impl->patchAddresses.erase(found->second.patchAddress);
@@ -543,7 +574,23 @@ void TrustedCemodRuntime::UnloadAll()
 			if (m_impl->mods.empty()) break;
 			handle = m_impl->mods.rbegin()->first;
 		}
-		(void)Unload(handle);
+		if (!Unload(handle))
+			break;
+	}
+}
+
+void TrustedCemodRuntime::AbandonAllForTitleShutdown()
+{
+	for (;;)
+	{
+		std::uint64_t handle{};
+		{
+			std::lock_guard lock(m_impl->mutex);
+			if (m_impl->mods.empty()) break;
+			handle = m_impl->mods.rbegin()->first;
+		}
+		if (!UnloadImpl(handle, false))
+			break;
 	}
 }
 

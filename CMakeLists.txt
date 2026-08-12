@@ -116,7 +116,7 @@ set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO ON)
 if (MSVC)
 	set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT CemuBin)
 	# floating point model: precise, fiber safe optimizations
-	add_compile_options(/EHsc /fp:precise)
+	add_compile_options(/EHsc /fp:precise /utf-8)
 	if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
 		# Speeds up static linking (especially helpful in incremental compilation)
 		if((CMAKE_LINKER MATCHES ".*lld-link.*") AND (CMAKE_AR MATCHES ".*llvm-lib.*"))

@@ -289,6 +289,12 @@ uint32 memory_getVirtualOffsetFromPointer(void*) { return 0; }
 
 namespace coreinit
 {
+	bool OSRunOnEmulatedCpuThreadQuiesced(std::function<void()> task, uint32)
+	{
+		if (!task) return false;
+		task();
+		return true;
+	}
 	MEMHeapHandle MEMCreateExpHeapEx(void*, uint32, uint32) { return nullptr; }
 	void* MEMAllocFromExpHeapEx(MEMHeapHandle, uint32, sint32) { return nullptr; }
 	void MEMFreeToExpHeap(MEMHeapHandle, void*) {}

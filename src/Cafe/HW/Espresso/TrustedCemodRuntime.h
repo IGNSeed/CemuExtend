@@ -21,12 +21,15 @@ public:
 		std::string& error);
 	[[nodiscard]] bool Unload(std::uint64_t handle);
 	void UnloadAll();
+	void AbandonAllForTitleShutdown();
 	void UpdatePermissions(std::uint32_t permissions, const ModServicePermissions& services);
 
 	[[nodiscard]] cemuextend_hle::Cex2Owner* Owner();
 	[[nodiscard]] std::size_t Size() const;
 
 private:
+	[[nodiscard]] bool UnloadImpl(std::uint64_t handle, bool invokeShutdown);
+
 	struct Impl;
 	std::unique_ptr<Impl> m_impl;
 };

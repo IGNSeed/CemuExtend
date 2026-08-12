@@ -633,6 +633,10 @@ namespace coreinit
 	// to timeoutMilliseconds for a title thread to accept the task.
 	bool OSRunOnEmulatedCpuThread(std::function<void()> task,
 		uint32 timeoutMilliseconds = 2000);
+	// 全PPC coreの既存timesliceを退出させ、新しいguest実行を停止した状態で
+	// lifecycle処理を実行する。patchやRPLを解放する処理はこのAPIを使用する。
+	bool OSRunOnEmulatedCpuThreadQuiesced(std::function<void()> task,
+		uint32 timeoutMilliseconds = 2000);
 
 	// internal
 	void __OSAddReadyThreadToRunQueue(OSThread_t* thread);

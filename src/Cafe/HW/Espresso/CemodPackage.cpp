@@ -660,22 +660,30 @@ bool ValidateElf(std::span<const std::byte> elf, const CemodManifest& manifest, 
 			return false;
 		}
 		const auto& table = sections[*bootstrap];
+		const auto bootstrapVersion = table.size >= 6 ? u16(table.offset + 4) : 0;
+		const auto bootstrapHeaderSize = bootstrapVersion == 2 ? 16U : 12U;
 		if (table.type != 1 || (table.flags & 2U) == 0 || table.size < 12 ||
 			!imageContains(table.address, table.size, false) || u32(table.offset) != 0x434d4231U ||
-			u16(table.offset + 4) != 1 || u16(table.offset + 6) != 24)
+			(bootstrapVersion != 1 && bootstrapVersion != 2) || u16(table.offset + 6) != 24)
 		{
 			error = "trusted ELF contains an invalid CMB1 bootstrap section";
 			return false;
 		}
 		const auto recordCount = u32(table.offset + 8);
-		if (recordCount == 0 || recordCount > 64 || table.size != 12U + recordCount * 24U)
+		if (recordCount == 0 || recordCount > 64 ||
+			table.size != bootstrapHeaderSize + recordCount * 24U)
 		{
 			error = "trusted ELF contains an invalid CMB1 record count";
 			return false;
 		}
+		if (bootstrapVersion == 2 && !imageContains(u32(table.offset + 12), 4, true))
+		{
+			error = "trusted ELF contains an invalid CMB1 shutdown handler";
+			return false;
+		}
 		for (std::uint32_t record = 0; record < recordCount; ++record)
 		{
-			const auto offset = table.offset + 12 + record * 24;
+			const auto offset = table.offset + bootstrapHeaderSize + record * 24;
 			if (u32(offset) == 0 || (u32(offset + 4) & 3U) != 0 || u32(offset + 12) == 0 ||
 				u32(offset + 20) != 0 || !imageContains(u32(offset + 16), 4, true))
 			{

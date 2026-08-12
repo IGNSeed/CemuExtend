@@ -12,6 +12,7 @@
 #include "Cafe/OS/libs/cemuextend/Cex2Host.h"
 #include "Cafe/OS/libs/cemuextend/cemuextend.h"
 #include "Cafe/OS/common/OSCommon.h"
+#include "Cafe/OS/libs/coreinit/coreinit_Thread.h"
 
 #include <chrono>
 #include <map>
@@ -464,6 +465,15 @@ bool CemodRuntime::Invoke(std::uint64_t handle, CemodLifecycle lifecycle,
 
 bool CemodRuntime::Unload(std::uint64_t handle)
 {
+	bool unloaded{};
+	const bool ran = coreinit::OSRunOnEmulatedCpuThreadQuiesced([this, handle, &unloaded] {
+		unloaded = UnloadQuiesced(handle);
+	});
+	return ran && unloaded;
+}
+
+bool CemodRuntime::UnloadQuiesced(std::uint64_t handle)
+{
 	if ((handle & Impl::kWupsHandleMask) != 0)
 		return m_impl->wups && m_impl->wups->Unload(handle & ~Impl::kWupsHandleMask);
 	if ((handle & Impl::kTrustedHandleMask) != 0)
@@ -584,7 +594,23 @@ void CemodRuntime::UpdateTitlePermissions(const ModServicePermissions& services)
 
 void CemodRuntime::UnloadAll()
 {
-	for (;;) { std::uint64_t handle{}; { std::lock_guard lock(m_impl->mutex); if (m_impl->mods.empty()) break; handle = m_impl->mods.begin()->first; } (void)Unload(handle); }
+	if (!coreinit::OSRunOnEmulatedCpuThreadQuiesced([this] { UnloadAllQuiesced(); }))
+		cemuLog_log(LogType::Force,
+			"CemuExtend could not acquire guest execution quiescence for Mod unload");
+}
+
+void CemodRuntime::UnloadAllQuiesced()
+{
+	for (;;)
+	{
+		std::uint64_t handle{};
+		{
+			std::lock_guard lock(m_impl->mutex);
+			if (m_impl->mods.empty()) break;
+			handle = m_impl->mods.begin()->first;
+		}
+		(void)UnloadQuiesced(handle);
+	}
 	m_impl->trusted.UnloadAll();
 	// UnloadChecked() flags a pending application-ends teardown for any plugin that
 	// was still Active/Initialized, so a plain UnloadAll() is a clean title shutdown.
@@ -608,9 +634,16 @@ void CemodRuntime::AbandonAllForTitleShutdown()
 				break;
 			handle = m_impl->mods.begin()->first;
 		}
-		(void)Unload(handle);
+		std::lock_guard lock(m_impl->mutex);
+		const auto found = m_impl->mods.find(handle);
+		if (found == m_impl->mods.end())
+			continue;
+		cemuextend_hle::Cex2Host::Instance().CloseOwner(*found->second.context);
+		PPCRecompiler_invalidateSandboxContext(found->second.context->AddressSpaceId(),
+			found->second.context->Generation());
+		m_impl->mods.erase(found);
 	}
-	m_impl->trusted.UnloadAll();
+	m_impl->trusted.AbandonAllForTitleShutdown();
 	if (m_impl->wups)
 		m_impl->wups->AbandonAllForTitleShutdown();
 	m_impl->applicationStarted = false;

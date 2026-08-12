@@ -70,6 +70,8 @@ add_library(CemuCafe
   HW/Espresso/PPCScheduler.cpp
   HW/Espresso/PPCSchedulerLLE.cpp
   HW/Espresso/PPCState.h
+	HW/Espresso/GuestExecutionQuiescence.cpp
+	HW/Espresso/GuestExecutionQuiescence.h
   HW/Espresso/CemodPackage.cpp
   HW/Espresso/CemodPackage.h
   HW/Espresso/CemodRuntime.cpp
@@ -793,6 +795,15 @@ if(BUILD_TESTING)
 	target_include_directories(cemod_package_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
 	target_link_libraries(cemod_package_tests PRIVATE OpenSSL::Crypto libzip::zip ZLIB::ZLIB)
 	add_test(NAME cemod_package_tests COMMAND cemod_package_tests)
+
+	add_executable(guest_execution_quiescence_tests
+		HW/Espresso/GuestExecutionQuiescence.cpp
+		tests/GuestExecutionQuiescenceTests.cpp
+	)
+	target_include_directories(guest_execution_quiescence_tests PRIVATE
+		${CMAKE_SOURCE_DIR}/src)
+	add_test(NAME guest_execution_quiescence_tests
+		COMMAND guest_execution_quiescence_tests)
 
 	add_executable(wups_binary_tests
 		HW/Espresso/WupsBinary.cpp

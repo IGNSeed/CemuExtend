@@ -6,6 +6,7 @@
 #include "Cafe/OS/libs/coreinit/coreinit_Alarm.h"
 #include "Cafe/OS/libs/snd_core/ax.h"
 #include "Cafe/HW/Espresso/Debugger/GDBStub.h"
+#include "Cafe/HW/Espresso/GuestExecutionQuiescence.h"
 #include "Cafe/HW/Espresso/Interpreter/PPCInterpreterInternal.h"
 #include "Cafe/HW/Espresso/Recompiler/PPCRecompiler.h"
 #include "Cafe/HW/Espresso/WupsServices.h"
@@ -89,6 +90,9 @@ namespace coreinit
 	std::mutex sHostCpuTaskMutex;
 	std::condition_variable sHostCpuTaskCondition;
 	std::deque<std::shared_ptr<HostCpuTask>> sHostCpuTasks;
+	GuestExecutionQuiescence sGuestExecutionQuiescence;
+	thread_local bool t_guestExecutionLeaseHeld{};
+	thread_local std::uint32_t t_guestExecutionQuiescenceDepth{};
 
 	void __OSProcessHostCpuTask()
 	{
@@ -1433,6 +1437,14 @@ namespace coreinit
 	void __OSThreadSwitchToNext()
 	{
 		cemu_assert_debug(__OSHasSchedulerLock());
+		const bool resumeGuestExecution = t_guestExecutionLeaseHeld;
+		if (resumeGuestExecution)
+		{
+			// Fiberを跨いでleaseを保持すると、停止中のguest stackもactiveとして
+			// 数え続ける。switch直前に外し、戻ったfiberがguestへ復帰する直前に戻す。
+			t_guestExecutionLeaseHeld = false;
+			sGuestExecutionQuiescence.Leave();
+		}
 
 		OSHostThread* hostThread = (OSHostThread*)Fiber::GetFiberPrivateData();
         cemu_assert_debug(hostThread);
@@ -1485,6 +1497,15 @@ namespace coreinit
 		__OSLoadThread(hostThread->m_thread, &hostThread->ppcInstance,
 			hostThread->selectedCore, hostThread->wupsOwner);
 		__OSThreadStartTimeslice(hostThread->m_thread, &hostThread->ppcInstance);
+		if (resumeGuestExecution)
+		{
+			// quiescence待機中にscheduler lockを保持しない。lease取得後は、
+			// callerが従来どおりlock保持状態で再開できるように戻す。
+			__OSUnlockScheduler();
+			sGuestExecutionQuiescence.Enter();
+			t_guestExecutionLeaseHeld = true;
+			__OSLockScheduler();
+		}
 	}
 
 #ifdef __arm64__
@@ -1508,11 +1529,15 @@ namespace coreinit
 		{
 			if (hCPU->remainingCycles > 0)
 			{
+				sGuestExecutionQuiescence.Enter();
+				t_guestExecutionLeaseHeld = true;
 				// try to enter recompiler immediately
 				PPCRecompiler_attemptEnterWithoutRecompile(hCPU, hCPU->instructionPointer);
 				// keep executing as long as there are cycles left
 				while ((--hCPU->remainingCycles) >= 0)
 					PPCInterpreterSlim_executeInstruction(hCPU);
+				t_guestExecutionLeaseHeld = false;
+				sGuestExecutionQuiescence.Leave();
 			}
 
 			// reset reservation
@@ -1689,6 +1714,47 @@ namespace coreinit
 				task->state == HostCpuTaskState::Cancelled;
 		});
 		return task->state == HostCpuTaskState::Completed && task->succeeded;
+	}
+
+	bool OSRunOnEmulatedCpuThreadQuiesced(std::function<void()> callback,
+		uint32 timeoutMilliseconds)
+	{
+		if (!callback)
+			return false;
+		return OSRunOnEmulatedCpuThread(
+			[callback = std::move(callback)] {
+				if (t_guestExecutionQuiescenceDepth != 0)
+				{
+					callback();
+					return;
+				}
+
+				const bool resumeCurrentLease = t_guestExecutionLeaseHeld;
+				if (resumeCurrentLease)
+					t_guestExecutionLeaseHeld = false;
+				try
+				{
+					sGuestExecutionQuiescence.RunQuiesced([&callback] {
+						++t_guestExecutionQuiescenceDepth;
+						try
+						{
+							callback();
+						}
+						catch (...)
+						{
+							--t_guestExecutionQuiescenceDepth;
+							throw;
+						}
+						--t_guestExecutionQuiescenceDepth;
+					}, resumeCurrentLease);
+				}
+				catch (...)
+				{
+					t_guestExecutionLeaseHeld = resumeCurrentLease;
+					throw;
+				}
+				t_guestExecutionLeaseHeld = resumeCurrentLease;
+			}, timeoutMilliseconds);
 	}
 
 	SysAllocator<OSThread_t, PPC_CORE_COUNT> s_defaultThreads;
