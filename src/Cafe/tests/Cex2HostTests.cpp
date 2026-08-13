@@ -614,6 +614,27 @@ void TestMouseAndPointerPolicy()
 		response.data() + sizeof(ResponseHeader));
 	CHECK(textEvent.codepoint.get() == 0x3042 && !textEvent.repeat);
 
+	host.KeyboardEvent(0xe5, true, 2);
+	response = PollUntil(host, context, session);
+	const auto* keyboardHeader = reinterpret_cast<const ResponseHeader*>(response.data());
+	CHECK(keyboardHeader->operation.get() == static_cast<std::uint16_t>(InputEvent::Keyboard));
+	CHECK(response.size() == sizeof(ResponseHeader) + sizeof(KeyboardEventPayload));
+	const auto& keyboardDown = *reinterpret_cast<const KeyboardEventPayload*>(
+		response.data() + sizeof(ResponseHeader));
+	CHECK(keyboardDown.usbHidUsage.get() == 0xe5 && keyboardDown.pressed == 1);
+	CHECK(keyboardDown.modifiers == 2);
+
+	// wxWidgetsとRaw Inputの二重配送は同じキー状態を再通知しない。
+	host.KeyboardEvent(0xe5, true, 2);
+	noEventSize = 0;
+	CHECK(host.Poll(context, session, noEvent, noEventSize) ==
+		static_cast<std::int32_t>(Error::NotFound));
+	host.KeyboardEvent(0xe5, false, 0);
+	response = PollUntil(host, context, session);
+	const auto& keyboardUp = *reinterpret_cast<const KeyboardEventPayload*>(
+		response.data() + sizeof(ResponseHeader));
+	CHECK(keyboardUp.usbHidUsage.get() == 0xe5 && keyboardUp.pressed == 0);
+
 	host.PointerFocusChanged(false);
 	response = PollUntil(host, context, session);
 	const auto& released = *reinterpret_cast<const MouseEventPayloadV2*>(

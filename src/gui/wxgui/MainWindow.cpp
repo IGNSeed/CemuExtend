@@ -22,6 +22,7 @@
 #include "wxHelper.h"
 #include "helpers/wxHelpers.h"
 #include "PadViewFrame.h"
+#include "CemuExtendTextInputKeyPolicy.h"
 
 #if defined(__WXGTK__)
 #include <gtk/gtk.h>
@@ -892,9 +893,11 @@ WXLRESULT MainWindow::MSWWindowProc(WXUINT nMsg, WXWPARAM wParam, WXLPARAM lPara
 			InputManager::instance().on_device_changed();
 		}
 	}
-	else if (nMsg == WM_INPUT && m_cemuextend_raw_mouse_requested &&
-		m_cemuextend_pointer_mode == static_cast<std::uint8_t>(
-			cemuextend::wire::PointerMode::CapturedRelative))
+	else if (nMsg == WM_INPUT &&
+		(m_cemuextend_raw_keyboard_registered ||
+			(m_cemuextend_raw_mouse_requested &&
+			 m_cemuextend_pointer_mode == static_cast<std::uint8_t>(
+				 cemuextend::wire::PointerMode::CapturedRelative))))
 	{
 		UINT size{};
 		if (GetRawInputData(reinterpret_cast<HRAWINPUT>(lParam), RID_INPUT, nullptr,
@@ -905,7 +908,10 @@ WXLRESULT MainWindow::MSWWindowProc(WXUINT nMsg, WXWPARAM wParam, WXLPARAM lPara
 				storage.data(), &size, sizeof(RAWINPUTHEADER)) == size)
 			{
 				const auto& raw = *reinterpret_cast<const RAWINPUT*>(storage.data());
-				if (raw.header.dwType == RIM_TYPEMOUSE)
+				if (raw.header.dwType == RIM_TYPEMOUSE &&
+					m_cemuextend_raw_mouse_requested &&
+					m_cemuextend_pointer_mode == static_cast<std::uint8_t>(
+						cemuextend::wire::PointerMode::CapturedRelative))
 				{
 					using cemuextend::wire::MouseButton;
 					std::uint32_t changed{};
@@ -942,6 +948,12 @@ WXLRESULT MainWindow::MSWWindowProc(WXUINT nMsg, WXWPARAM wParam, WXLPARAM lPara
 						EmitCemuExtendRawMouseEvent(raw.data.mouse.lLastX,
 							raw.data.mouse.lLastY, changed);
 					}
+				}
+				else if (raw.header.dwType == RIM_TYPEKEYBOARD &&
+					m_cemuextend_raw_keyboard_registered)
+				{
+					EmitCemuExtendRawKeyboardEvent(raw.data.keyboard.VKey,
+						raw.data.keyboard.MakeCode, raw.data.keyboard.Flags);
 				}
 			}
 		}
@@ -1590,6 +1602,69 @@ bool MainWindow::EnsureCemuExtendRawMouse()
 #endif
 }
 
+bool MainWindow::EnsureCemuExtendRawKeyboard()
+{
+#if BOOST_OS_WINDOWS
+	if (m_cemuextend_raw_keyboard_registered)
+		return true;
+	RAWINPUTDEVICE device{};
+	device.usUsagePage = 0x01;
+	device.usUsage = 0x06;
+	device.dwFlags = RIDEV_INPUTSINK;
+	device.hwndTarget = reinterpret_cast<HWND>(GetHandle());
+	m_cemuextend_raw_keyboard_registered =
+		RegisterRawInputDevices(&device, 1, sizeof(device)) != FALSE;
+	if (!m_cemuextend_raw_keyboard_logged)
+	{
+		m_cemuextend_raw_keyboard_logged = true;
+		cemuLog_log(LogType::Force,
+			"CemuExtend input: Windows Raw Input keyboard {}",
+			m_cemuextend_raw_keyboard_registered ? "enabled" :
+				"unavailable; using wxWidgets fallback");
+	}
+	return m_cemuextend_raw_keyboard_registered;
+#else
+	return false;
+#endif
+}
+
+void MainWindow::EmitCemuExtendRawKeyboardEvent(std::uint16_t virtualKey,
+	std::uint16_t makeCode, std::uint16_t flags)
+{
+	if (!g_window_info.app_active.load())
+	{
+		ResetCemuExtendRawKeyboardState();
+		return;
+	}
+
+	const auto event = CemuExtendWindowsKeyboard::Decode(virtualKey, makeCode, flags);
+	if (event.usage == 0)
+		return;
+	if (event.usage == 0xe5 && event.pressed && !m_cemuextend_raw_right_shift_logged)
+	{
+		m_cemuextend_raw_right_shift_logged = true;
+		cemuLog_log(LogType::Force,
+			"CemuExtend input: physical Right Shift received through Windows Raw Input");
+	}
+	m_cemuextend_raw_keyboard_modifiers.Apply(event.usage, event.pressed);
+
+	const bool nativeTextInput = HasCemuExtendTextInputNativeFocus();
+	const bool nativeSubmit = nativeTextInput && event.pressed &&
+		(event.usage == 0x28 || event.usage == 0x58) &&
+		CanSubmitCemuExtendTextInput();
+	if (CemuExtendTextInputKeyPolicy::ShouldMirror(
+		nativeTextInput, event.usage, nativeSubmit))
+	{
+		cemuextend_hle::KeyboardEvent(event.usage, event.pressed,
+			m_cemuextend_raw_keyboard_modifiers.GenericMask());
+	}
+}
+
+void MainWindow::ResetCemuExtendRawKeyboardState()
+{
+	m_cemuextend_raw_keyboard_modifiers.Reset();
+}
+
 void MainWindow::UpdateCemuExtendPointerConfinement(bool confine)
 {
 #if BOOST_OS_WINDOWS
@@ -2165,6 +2240,10 @@ void MainWindow::CreateCanvas()
 	m_render_canvas->Bind(wxEVT_KEY_UP, &MainWindow::OnKeyUp, this);
 	m_render_canvas->Bind(wxEVT_KEY_DOWN, &MainWindow::OnKeyDown, this);
 	m_render_canvas->Bind(wxEVT_CHAR, &MainWindow::OnChar, this);
+
+	// ゲーム用子ウィンドウがwxキーイベントを生成しない場合に備え、
+	// CEX2物理キーボードにはWindows Raw Input経路も常時用意する。
+	(void)EnsureCemuExtendRawKeyboard();
 
 	m_render_canvas->SetDropTarget(new wxAmiiboDropTarget(this));
 	m_game_panel->GetSizer()->Add(m_render_canvas, 1, wxEXPAND, 0, nullptr);

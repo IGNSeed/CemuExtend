@@ -683,6 +683,8 @@ int CemuApp::FilterEvent(wxEvent& event)
 		if(!activate_event.GetActive())
 		{
 			g_window_info.set_keystatesup();
+			if (g_mainFrame != nullptr)
+				g_mainFrame->ResetCemuExtendRawKeyboardState();
 			cemuextend_hle::KeyboardFocusLost();
 		}
 	}

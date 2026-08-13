@@ -11,6 +11,7 @@
 
 #include "wxgui/LoggingWindow.h"
 #include "wxgui/components/wxGameList.h"
+#include "wxgui/CemuExtendWindowsKeyboard.h"
 
 #include <future>
 #include <cstdint>
@@ -170,6 +171,10 @@ private:
 	void EmitCemuExtendRawMouseEvent(std::int32_t deltaX, std::int32_t deltaY,
 		std::uint32_t changedButtons = 0);
 	bool EnsureCemuExtendRawMouse();
+	bool EnsureCemuExtendRawKeyboard();
+	void EmitCemuExtendRawKeyboardEvent(std::uint16_t virtualKey,
+		std::uint16_t makeCode, std::uint16_t flags);
+	void ResetCemuExtendRawKeyboardState();
 	void UpdateCemuExtendPointerConfinement(bool confine);
 	bool ApplyCemuExtendPointerPolicy();
 
@@ -201,6 +206,10 @@ private:
 	bool m_cemuextend_raw_mouse_requested{true};
 	bool m_cemuextend_raw_mouse_registered{};
 	bool m_cemuextend_raw_mouse_seen{};
+	bool m_cemuextend_raw_keyboard_registered{};
+	bool m_cemuextend_raw_keyboard_logged{};
+	bool m_cemuextend_raw_right_shift_logged{};
+	CemuExtendWindowsKeyboard::ModifierState m_cemuextend_raw_keyboard_modifiers;
 	bool m_cemuextend_suppress_next_captured_wx_motion{};
 	bool m_cemuextend_pointer_confined{};
 	wxSize m_restored_size;

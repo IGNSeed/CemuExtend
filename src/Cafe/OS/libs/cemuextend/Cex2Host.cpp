@@ -1371,8 +1371,11 @@ void Cex2Host::KeyboardEvent(std::uint16_t usage, bool pressed, std::uint8_t mod
 	for (auto& [id, session] : m_impl->sessions)
 	{
 		if (!Impl::HasPermission(session, 1, static_cast<std::uint16_t>(ServiceId::Input))) continue;
-		if (pressed) session.pressedKeyboardUsages.insert(usage);
-		else session.pressedKeyboardUsages.erase(usage);
+		// Raw InputとwxWidgetsの両方から同じ遷移が届いても、guestへは一度だけ通知する。
+		const bool changed = pressed
+			? session.pressedKeyboardUsages.insert(usage).second
+			: session.pressedKeyboardUsages.erase(usage) != 0;
+		if (!changed) continue;
 		cemuextend::wire::KeyboardEventPayload event{};
 		event.identity.eventId = session.nextInputEventId++;
 		event.identity.origin = static_cast<std::uint8_t>(cemuextend::wire::InputOrigin::Physical);
