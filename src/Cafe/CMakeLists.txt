@@ -898,6 +898,22 @@ if(BUILD_TESTING)
 	)
 	add_test(NAME cemod_runtime_tests COMMAND cemod_runtime_tests)
 
+	add_executable(trusted_cemod_runtime_tests
+		HW/Espresso/TrustedCemodRuntime.cpp
+		tests/TrustedCemodRuntimeTests.cpp
+	)
+	target_compile_definitions(trusted_cemod_runtime_tests PRIVATE CEMU_CEX2_TESTING)
+	target_include_directories(trusted_cemod_runtime_tests PRIVATE
+		${CMAKE_SOURCE_DIR}/src
+		${CMAKE_SOURCE_DIR}/dependencies/libcemuextend/include
+	)
+	target_link_libraries(trusted_cemod_runtime_tests PRIVATE fmt::fmt)
+	if(MSVC)
+		target_compile_options(trusted_cemod_runtime_tests PRIVATE /utf-8)
+	endif()
+	add_test(NAME trusted_cemod_runtime_tests COMMAND trusted_cemod_runtime_tests)
+	set_tests_properties(trusted_cemod_runtime_tests PROPERTIES TIMEOUT 10)
+
 	if(CEMU_ENABLE_FUZZING)
 		add_executable(cex2_decoder_fuzzer tests/Cex2DecoderFuzzer.cpp)
 		target_include_directories(cex2_decoder_fuzzer PRIVATE

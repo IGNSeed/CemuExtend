@@ -394,6 +394,14 @@ namespace
 
 struct TrustedCemodRuntime::Impl
 {
+	enum class UnloadState : std::uint8_t
+	{
+		Loaded,
+		Preparing,
+		Prepared,
+		Finishing,
+	};
+
 	struct Instance
 	{
 		CemodPackage package;
@@ -402,7 +410,7 @@ struct TrustedCemodRuntime::Impl
 		std::uint32_t patchAddress{};
 		std::uint32_t originalInstruction{};
 		std::uint32_t shutdownAddress{};
-		bool prepared{};
+		UnloadState unloadState{UnloadState::Loaded};
 	};
 
 	mutable std::mutex mutex;
@@ -535,60 +543,89 @@ std::optional<std::uint64_t> TrustedCemodRuntime::Load(CemodPackage package,
 
 bool TrustedCemodRuntime::PrepareUnload(std::uint64_t handle)
 {
+	std::uint32_t shutdownAddress{};
+	{
+		std::lock_guard lock(m_impl->mutex);
+		const auto found = m_impl->mods.find(handle);
+		if (found == m_impl->mods.end()) return false;
+		if (found->second.unloadState == Impl::UnloadState::Prepared) return true;
+		if (found->second.unloadState != Impl::UnloadState::Loaded) return false;
+		shutdownAddress = found->second.shutdownAddress;
+		if (shutdownAddress != 0 && PPCInterpreter_getCurrentInstance() == nullptr)
+			return false;
+		found->second.unloadState = Impl::UnloadState::Preparing;
+	}
+
+	// guest codeはCEX2などを通してruntimeへ再入できるため、mutex外で呼ぶ。
+	// phase 0は全core停止中に追加hookの入口だけを復元し、drainはphase 1へ分離する。
+	if (shutdownAddress != 0)
+		PPCCoreCallback(shutdownAddress, 0U);
+
 	std::lock_guard lock(m_impl->mutex);
 	const auto found = m_impl->mods.find(handle);
-	if (found == m_impl->mods.end()) return false;
-	if (found->second.prepared) return true;
-	if (found->second.shutdownAddress != 0)
-	{
-		// phase 0は全core停止中に実行する。追加hookの入口を復元するだけで、
-		// schedulerをyieldし得るdrainやGPU待機はphase 1へ分離する。
-		if (PPCInterpreter_getCurrentInstance() == nullptr)
-			return false;
-		PPCCoreCallback(found->second.shutdownAddress, 0U);
-	}
+	if (found == m_impl->mods.end() ||
+		found->second.unloadState != Impl::UnloadState::Preparing)
+		return false;
 	Write32(found->second.patchAddress, found->second.originalInstruction);
 	PPCRecompiler_invalidateRange(found->second.patchAddress, found->second.patchAddress + 4);
 	m_impl->patchAddresses.erase(found->second.patchAddress);
-	found->second.prepared = true;
+	found->second.unloadState = Impl::UnloadState::Prepared;
 	return true;
 }
 
 bool TrustedCemodRuntime::FinishUnload(std::uint64_t handle)
 {
+	std::uint32_t shutdownAddress{};
+	{
+		std::lock_guard lock(m_impl->mutex);
+		const auto found = m_impl->mods.find(handle);
+		if (found == m_impl->mods.end() ||
+			found->second.unloadState != Impl::UnloadState::Prepared)
+			return false;
+		shutdownAddress = found->second.shutdownAddress;
+		if (shutdownAddress != 0 && PPCInterpreter_getCurrentInstance() == nullptr)
+			return false;
+		found->second.unloadState = Impl::UnloadState::Finishing;
+	}
+
+	// phase 1完了まではownerとcodecaveを維持する。callback内のCEX2Closeも
+	// Owner()を再取得でき、hook drainやGX2待機でschedulerをyieldできる。
+	if (shutdownAddress != 0)
+		PPCCoreCallback(shutdownAddress, 1U);
+
 	std::lock_guard lock(m_impl->mutex);
 	const auto found = m_impl->mods.find(handle);
-	if (found == m_impl->mods.end() || !found->second.prepared) return false;
-	if (found->second.shutdownAddress != 0)
-	{
-		// phase 1はentryを全てrevokeした後に通常のguest scheduler上で実行する。
-		// hook内処理のdrainやGX2待機でyieldしても、payloadへ新規流入は起きない。
-		if (PPCInterpreter_getCurrentInstance() == nullptr)
-			return false;
-		PPCCoreCallback(found->second.shutdownAddress, 1U);
-	}
-	return Release(handle);
+	if (found == m_impl->mods.end() ||
+		found->second.unloadState != Impl::UnloadState::Finishing)
+		return false;
+	return ReleaseLocked(handle, false);
 }
 
-bool TrustedCemodRuntime::Release(std::uint64_t handle)
+bool TrustedCemodRuntime::ReleaseLocked(std::uint64_t handle, bool abandon)
 {
 	const auto found = m_impl->mods.find(handle);
 	if (found == m_impl->mods.end()) return false;
-	if (!found->second.prepared)
+	if (!abandon && found->second.unloadState != Impl::UnloadState::Finishing)
+		return false;
+	if (found->second.unloadState == Impl::UnloadState::Loaded ||
+		found->second.unloadState == Impl::UnloadState::Preparing)
 	{
 		Write32(found->second.patchAddress, found->second.originalInstruction);
 		PPCRecompiler_invalidateRange(found->second.patchAddress,
 			found->second.patchAddress + 4);
 		m_impl->patchAddresses.erase(found->second.patchAddress);
 	}
-	RPLLoader_ReleaseCodeCaveMem(found->second.allocation);
-	m_impl->mods.erase(found);
-	if (m_impl->mods.empty() && m_impl->owner)
+	const bool lastInstance = m_impl->mods.size() == 1;
+	if (lastInstance && m_impl->owner)
 	{
+		// guest callbackが戻った後に残存sessionを閉じ、以降の新規CEX2操作を止める。
 		cemuextend_hle::Cex2Host::Instance().CloseOwner(*m_impl->owner);
 		m_impl->owner->Stop();
-		m_impl->owner.reset();
 	}
+	RPLLoader_ReleaseCodeCaveMem(found->second.allocation);
+	m_impl->mods.erase(found);
+	if (m_impl->mods.empty())
+		m_impl->owner.reset();
 	return true;
 }
 
@@ -601,18 +638,11 @@ std::optional<std::uint64_t> TrustedCemodRuntime::LatestHandle() const
 
 void TrustedCemodRuntime::AbandonAllForTitleShutdown()
 {
-	for (;;)
-	{
-		std::uint64_t handle{};
-		{
-			std::lock_guard lock(m_impl->mutex);
-			if (m_impl->mods.empty()) break;
-			handle = m_impl->mods.rbegin()->first;
-		}
-		std::lock_guard lock(m_impl->mutex);
-		if (!Release(handle))
+	// callerはPPC scheduler停止後である。guest callbackは再実行せず、残存物だけを破棄する。
+	std::lock_guard lock(m_impl->mutex);
+	while (!m_impl->mods.empty())
+		if (!ReleaseLocked(m_impl->mods.rbegin()->first, true))
 			break;
-	}
 }
 
 void TrustedCemodRuntime::UpdatePermissions(std::uint32_t permissions,
@@ -635,3 +665,24 @@ std::size_t TrustedCemodRuntime::Size() const
 	std::lock_guard lock(m_impl->mutex);
 	return m_impl->mods.size();
 }
+
+#ifdef CEMU_CEX2_TESTING
+std::uint64_t TrustedCemodRuntime::InstallInstanceForTesting(std::uint64_t titleId,
+	std::uint32_t allocationAddress, std::uint32_t patchAddress,
+	std::uint32_t originalInstruction, std::uint32_t shutdownAddress)
+{
+	std::lock_guard lock(m_impl->mutex);
+	if (!m_impl->owner)
+		m_impl->owner = std::make_unique<TrustedTitleOwner>(titleId,
+			m_impl->nextGeneration++, 0, ModServicePermissions{});
+	CemodPackage package;
+	package.targetTitleId = titleId;
+	package.manifest.modId = fmt::format("test.trusted.{}", m_impl->nextHandle);
+	const auto handle = m_impl->nextHandle++;
+	m_impl->patchAddresses.insert(patchAddress);
+	m_impl->mods.emplace(handle, Impl::Instance{std::move(package),
+		MEMPTR<void>{allocationAddress}, 4, patchAddress, originalInstruction,
+		shutdownAddress});
+	return handle;
+}
+#endif

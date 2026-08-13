@@ -28,8 +28,15 @@ public:
 	[[nodiscard]] cemuextend_hle::Cex2Owner* Owner();
 	[[nodiscard]] std::size_t Size() const;
 
+#ifdef CEMU_CEX2_TESTING
+	// 実際のloader依存を持ち込まず、unloadのlocking/lifetimeを単体検証する。
+	[[nodiscard]] std::uint64_t InstallInstanceForTesting(std::uint64_t titleId,
+		std::uint32_t allocationAddress, std::uint32_t patchAddress,
+		std::uint32_t originalInstruction, std::uint32_t shutdownAddress);
+#endif
+
 private:
-	[[nodiscard]] bool Release(std::uint64_t handle);
+	[[nodiscard]] bool ReleaseLocked(std::uint64_t handle, bool abandon);
 
 	struct Impl;
 	std::unique_ptr<Impl> m_impl;
