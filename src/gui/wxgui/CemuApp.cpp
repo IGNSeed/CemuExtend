@@ -1,4 +1,5 @@
 #include "wxgui/CemuApp.h"
+#include "wxgui/CemuExtendTextInputKeyPolicy.h"
 #include "wxCemuConfig.h"
 #include "wxgui/MainWindow.h"
 #include "wxgui/wxgui.h"
@@ -649,7 +650,8 @@ int CemuApp::FilterEvent(wxEvent& event)
 		const bool native_submit = native_text_input_event &&
 			(usage == 0x28 || usage == 0x58) &&
 			g_mainFrame->CanSubmitCemuExtendTextInput();
-		if (!native_text_input_event || native_submit)
+		if (CemuExtendTextInputKeyPolicy::ShouldMirror(
+			native_text_input_event, usage, native_submit))
 			cemuextend_hle::KeyboardEvent(usage, true,
 				CemuExtendKeyModifiers(key_event));
 	}
@@ -661,7 +663,8 @@ int CemuApp::FilterEvent(wxEvent& event)
 		const bool native_submit = native_text_input_event &&
 			(usage == 0x28 || usage == 0x58) &&
 			g_mainFrame->CanSubmitCemuExtendTextInput();
-		if (!native_text_input_event || native_submit)
+		if (CemuExtendTextInputKeyPolicy::ShouldMirror(
+			native_text_input_event, usage, native_submit))
 			cemuextend_hle::KeyboardEvent(usage, false,
 				CemuExtendKeyModifiers(key_event));
 	}

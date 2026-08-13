@@ -154,6 +154,13 @@ set_property(TARGET CemuWxGui PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CO
 cemu_use_precompiled_header(CemuWxGui)
 
 if(BUILD_TESTING)
+  add_executable(cemuextend_text_input_key_policy_tests
+    tests/CemuExtendTextInputKeyPolicyTests.cpp
+  )
+  target_include_directories(cemuextend_text_input_key_policy_tests PRIVATE "${CMAKE_SOURCE_DIR}/src")
+  add_test(NAME cemuextend_text_input_key_policy_tests
+    COMMAND cemuextend_text_input_key_policy_tests)
+
   add_executable(cemod_gui_model_tests
     CemodManagementModel.cpp
     "${CMAKE_SOURCE_DIR}/src/Cafe/HW/Espresso/CemodPackage.cpp"
