@@ -142,6 +142,8 @@ constexpr std::array kOperations{
 	OperationDefinition{4,2,1,2,65520,0,0,0,Handler::Configuration},
 	OperationDefinition{4,3,1,2,260,0,0,0,Handler::Configuration},
 	OperationDefinition{4,4,1,1,65520,65520,0,0,Handler::Configuration},
+	OperationDefinition{4,5,1,1,1100,61440,0,0,Handler::Configuration},
+	OperationDefinition{4,6,1,2,65520,0,0,0,Handler::Configuration},
 	OperationDefinition{5,1,1,1,4096,64,0,0,Handler::File},
 	OperationDefinition{5,2,1,1,4096,65520,0,0,Handler::File},
 	OperationDefinition{5,3,1,1,4096,65520,0,0,Handler::File},

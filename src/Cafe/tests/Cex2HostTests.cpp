@@ -212,6 +212,62 @@ void TestExactOnceAdmission()
 	CHECK(host.Close(context, replacement) == static_cast<std::int32_t>(Error::Ok));
 }
 
+void TestJsonDocumentStorage()
+{
+	auto& host = cemuextend_hle::Cex2Host::Instance();
+	host.CloseAll();
+	ModExecutionContext context(19, 1, "json-storage-test-principal");
+	context.SetTitleId(0xce02000000000009ULL);
+	context.SetGrantedPermissions(3);
+	const auto session = Open(host, context);
+
+	const std::string jsonText = "{\"schemaVersion\":1}";
+	cemuextend::wire::Encoder writeJson;
+	CHECK(writeJson.String("TaneClient"));
+	CHECK(writeJson.String("gui/cps.json"));
+	writeJson.Bytes({reinterpret_cast<const std::byte*>(jsonText.data()), jsonText.size()});
+	auto request = Request(100,
+		static_cast<std::uint16_t>(cemuextend::wire::ConfigurationOperation::WriteJson),
+		writeJson.data(), cemuextend::wire::ServiceId::Configuration);
+	CHECK(host.Submit(context, session, request) == static_cast<std::int32_t>(Error::Ok));
+	auto response = PollUntil(host, context, session);
+	CHECK(reinterpret_cast<ResponseHeader*>(response.data())->status.get() ==
+		static_cast<std::uint16_t>(Status::Ok));
+	const auto jsonPath = std::filesystem::temp_directory_path() / "cemuextend-cex2-tests" /
+		"documents" / "TaneClient" / "Config" / "gui" / "cps.json";
+	std::ifstream jsonFile(jsonPath, std::ios::binary);
+	CHECK(jsonFile.good());
+	const std::string savedJson((std::istreambuf_iterator<char>(jsonFile)),
+		std::istreambuf_iterator<char>());
+	CHECK(savedJson == jsonText);
+
+	cemuextend::wire::Encoder readJson;
+	CHECK(readJson.String("TaneClient"));
+	CHECK(readJson.String("gui/cps.json"));
+	request = Request(101,
+		static_cast<std::uint16_t>(cemuextend::wire::ConfigurationOperation::ReadJson),
+		readJson.data(), cemuextend::wire::ServiceId::Configuration);
+	CHECK(host.Submit(context, session, request) == static_cast<std::int32_t>(Error::Ok));
+	response = PollUntil(host, context, session);
+	CHECK(reinterpret_cast<ResponseHeader*>(response.data())->status.get() ==
+		static_cast<std::uint16_t>(Status::Ok));
+	CHECK(response.size() == sizeof(ResponseHeader) + jsonText.size());
+	CHECK(std::memcmp(response.data() + sizeof(ResponseHeader), jsonText.data(),
+		jsonText.size()) == 0);
+
+	cemuextend::wire::Encoder escapedJson;
+	CHECK(escapedJson.String("TaneClient"));
+	CHECK(escapedJson.String("gui\\..\\escape.json"));
+	request = Request(102,
+		static_cast<std::uint16_t>(cemuextend::wire::ConfigurationOperation::ReadJson),
+		escapedJson.data(), cemuextend::wire::ServiceId::Configuration);
+	CHECK(host.Submit(context, session, request) == static_cast<std::int32_t>(Error::Ok));
+	response = PollUntil(host, context, session);
+	CHECK(reinterpret_cast<ResponseHeader*>(response.data())->status.get() ==
+		static_cast<std::uint16_t>(Status::PermissionDenied));
+	CHECK(host.Close(context, session) == static_cast<std::int32_t>(Error::Ok));
+}
+
 void TestPrincipalStorageAndPagination()
 {
 	auto& host = cemuextend_hle::Cex2Host::Instance(); host.CloseAll();
@@ -848,7 +904,12 @@ int main(int argc, char** argv)
 	const bool pointerOnly = argc == 2 && std::string_view(argv[1]) == "--pointer-only";
 	const bool diagnosticsOnly =
 		argc == 2 && std::string_view(argv[1]) == "--diagnostics-only";
-	if (diagnosticsOnly)
+	const bool jsonOnly = argc == 2 && std::string_view(argv[1]) == "--json-only";
+	if (jsonOnly)
+	{
+		TestJsonDocumentStorage();
+	}
+	else if (diagnosticsOnly)
 	{
 		TestDiagnosticsGraphicsApi();
 	}
@@ -863,6 +924,7 @@ int main(int argc, char** argv)
 		TestOwnershipCopyAndCancel();
 		TestBackpressureAndProtocolReap();
 		TestExactOnceAdmission();
+		TestJsonDocumentStorage();
 		TestPrincipalStorageAndPagination();
 		TestTitleServicePermissionsAndRevocation();
 		TestObservedInputSnapshot();

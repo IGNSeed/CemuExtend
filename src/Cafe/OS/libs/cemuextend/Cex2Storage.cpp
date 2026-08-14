@@ -38,6 +38,9 @@ constexpr std::uint32_t kMaximumFiles = 4096;
 constexpr std::size_t kMaximumConfigEntries = 1024;
 constexpr std::size_t kMaximumConfigBytes = 1024 * 1024;
 constexpr std::size_t kMaximumValueBytes = 64 * 1024;
+constexpr std::size_t kMaximumJsonDocumentBytes = 60 * 1024;
+constexpr std::size_t kMaximumApplicationBytes = 64;
+constexpr std::size_t kMaximumJsonPathBytes = 1024;
 constexpr std::size_t kMaximumPageEntries = 128;
 
 std::mutex s_storageMutex;
@@ -97,7 +100,8 @@ bool IsValidUtf8(std::string_view text)
 
 std::optional<std::vector<std::string>> SplitPath(std::string_view path, bool allowRoot)
 {
-	if (!IsValidUtf8(path) || path.find('\0') != std::string_view::npos || path.starts_with('/'))
+	if (!IsValidUtf8(path) || path.find('\0') != std::string_view::npos || path.starts_with('/') ||
+		path.find('\\') != std::string_view::npos || path.find(':') != std::string_view::npos)
 		return std::nullopt;
 	if (allowRoot && (path.empty() || path == ".")) return std::vector<std::string>{};
 	if (path.empty()) return std::nullopt;
@@ -112,6 +116,16 @@ std::optional<std::vector<std::string>> SplitPath(std::string_view path, bool al
 		begin = end + 1;
 	}
 	return result;
+}
+
+fs::path JsonDocumentRoot(std::string_view application)
+{
+#ifdef CEMU_CEX2_TESTING
+	return fs::temp_directory_path() / "cemuextend-cex2-tests" / "documents" /
+		fs::u8path(application) / "Config";
+#else
+	return fs::temp_directory_path() / fs::u8path(application) / "Config";
+#endif
 }
 
 #ifndef _WIN32
@@ -552,9 +566,171 @@ Cex2StorageResult SaveConfig(const fs::path& root, const ConfigMap& values)
 	return {Status::Ok};
 }
 
+Cex2StorageResult ConfigJson(std::uint16_t operation,
+	std::span<const std::byte> payload)
+{
+	Decoder decoder(payload);
+	std::string application;
+	std::string pathText;
+	if (!decoder.String(application) || !decoder.String(pathText) ||
+		application.empty() || application.size() > kMaximumApplicationBytes ||
+		pathText.empty() || pathText.size() > kMaximumJsonPathBytes)
+		return {Status::InvalidArgument};
+
+	const auto applicationParts = SplitPath(application, false);
+	const auto parts = SplitPath(pathText, false);
+	if (!applicationParts || applicationParts->size() != 1 || !parts ||
+		!pathText.ends_with(".json"))
+		return {Status::PermissionDenied};
+
+	const bool write = operation == static_cast<std::uint16_t>(
+		ConfigurationOperation::WriteJson);
+	if (!write && operation != static_cast<std::uint16_t>(
+		ConfigurationOperation::ReadJson))
+		return {Status::NotSupported};
+
+	std::span<const std::byte> json;
+	if (write)
+	{
+		if (decoder.remaining() > kMaximumJsonDocumentBytes ||
+			!decoder.Bytes(decoder.remaining(), json) ||
+			!IsValidUtf8({reinterpret_cast<const char*>(json.data()), json.size()}))
+			return {Status::InvalidArgument};
+	}
+	else if (decoder.remaining())
+	{
+		return {Status::InvalidArgument};
+	}
+
+	const auto rootPath = JsonDocumentRoot(application);
+#ifndef _WIN32
+	Fd root = OpenRoot(rootPath);
+	if (!root) return {Status::IoError};
+	Fd parent = OpenParent(root.get(), *parts, write);
+	if (!parent) return {ErrnoStatus(errno)};
+	const auto& name = parts->back();
+	if (!write)
+	{
+		Fd input(::openat(parent.get(), name.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
+		if (!input) return {ErrnoStatus(errno)};
+		struct stat stat{};
+		if (::fstat(input.get(), &stat) != 0 || !S_ISREG(stat.st_mode))
+			return {Status::PermissionDenied};
+		if (stat.st_size < 0 || static_cast<std::uint64_t>(stat.st_size) >
+			kMaximumJsonDocumentBytes) return {Status::TooLarge};
+		std::vector<std::byte> output(static_cast<std::size_t>(stat.st_size));
+		std::size_t done{};
+		while (done < output.size())
+		{
+			const auto count = ::pread(input.get(), output.data() + done,
+				output.size() - done, static_cast<off_t>(done));
+			if (count <= 0) return {Status::IoError};
+			done += static_cast<std::size_t>(count);
+		}
+		return {Status::Ok, std::move(output)};
+	}
+
+	const auto temporary = fmt::format(".cex2-json-{:08x}.tmp", std::random_device{}());
+	Fd output(::openat(parent.get(), temporary.c_str(),
+		O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600));
+	if (!output) return {ErrnoStatus(errno)};
+	auto removeTemporary = [&] { (void)::unlinkat(parent.get(), temporary.c_str(), 0); };
+	std::size_t done{};
+	while (done < json.size())
+	{
+		const auto count = ::write(output.get(), json.data() + done, json.size() - done);
+		if (count <= 0) { removeTemporary(); return {Status::IoError}; }
+		done += static_cast<std::size_t>(count);
+	}
+	if (::fsync(output.get()) != 0 ||
+		::renameat(parent.get(), temporary.c_str(), parent.get(), name.c_str()) != 0 ||
+		::fsync(parent.get()) != 0)
+	{
+		removeTemporary();
+		return {Status::IoError};
+	}
+#else
+	auto root = OpenRoot(rootPath);
+	if (!root) return {Status::IoError};
+	DWORD error{};
+	auto parent = OpenParent(root.get(), *parts, write, error);
+	if (!parent) return {WinStatus(error)};
+	const auto& name = parts->back();
+	if (!write)
+	{
+		auto input = OpenRelative(parent.get(), name, false, false,
+			GENERIC_READ | FILE_READ_ATTRIBUTES, error);
+		if (!input) return {WinStatus(error)};
+		FILE_STANDARD_INFO standard{};
+		if (!::GetFileInformationByHandleEx(input.get(), FileStandardInfo, &standard,
+			sizeof(standard)) || standard.EndOfFile.QuadPart < 0)
+			return {Status::IoError};
+		if (static_cast<std::uint64_t>(standard.EndOfFile.QuadPart) >
+			kMaximumJsonDocumentBytes) return {Status::TooLarge};
+		std::vector<std::byte> output(
+			static_cast<std::size_t>(standard.EndOfFile.QuadPart));
+		DWORD read{};
+		if (!output.empty() && (!::ReadFile(input.get(), output.data(),
+			static_cast<DWORD>(output.size()), &read, nullptr) || read != output.size()))
+			return {Status::IoError};
+		return {Status::Ok, std::move(output)};
+	}
+
+	const auto temporary = fmt::format(".cex2-json-{:08x}.tmp", std::random_device{}());
+	auto output = OpenRelative(parent.get(), temporary, false, true,
+		GENERIC_READ | GENERIC_WRITE | DELETE | FILE_READ_ATTRIBUTES, error, true);
+	if (!output) return {WinStatus(error)};
+	auto removeTemporary = [&] {
+		FILE_DISPOSITION_INFO disposition{TRUE};
+		(void)::SetFileInformationByHandle(output.get(), FileDispositionInfo,
+			&disposition, sizeof(disposition));
+	};
+	std::size_t done{};
+	while (done < json.size())
+	{
+		DWORD written{};
+		const auto chunk = static_cast<DWORD>(std::min<std::size_t>(
+			json.size() - done, std::numeric_limits<DWORD>::max()));
+		if (!::WriteFile(output.get(), json.data() + done, chunk, &written, nullptr) ||
+			written == 0)
+		{
+			removeTemporary();
+			return {Status::IoError};
+		}
+		done += written;
+	}
+	if (!::FlushFileBuffers(output.get()))
+	{
+		removeTemporary();
+		return {Status::IoError};
+	}
+	const auto wideName = (rootPath / fs::u8path(pathText)).wstring();
+	if (wideName.empty()) { removeTemporary(); return {Status::InvalidArgument}; }
+	const auto renameBytes = sizeof(FILE_RENAME_INFO) +
+		wideName.size() * sizeof(wchar_t);
+	std::vector<std::byte> renameStorage(renameBytes);
+	auto* rename = reinterpret_cast<FILE_RENAME_INFO*>(renameStorage.data());
+	rename->Flags = FILE_RENAME_FLAG_REPLACE_IF_EXISTS;
+	rename->RootDirectory = nullptr;
+	rename->FileNameLength = static_cast<DWORD>(wideName.size() * sizeof(wchar_t));
+	std::memcpy(rename->FileName, wideName.data(), rename->FileNameLength);
+	if (!::SetFileInformationByHandle(output.get(), FileRenameInfoEx, rename,
+		static_cast<DWORD>(renameBytes)))
+	{
+		removeTemporary();
+		return {WinStatus(::GetLastError())};
+	}
+#endif
+	return {Status::Ok};
+}
+
 Cex2StorageResult Config(std::uint64_t title, std::string_view principal, std::uint16_t operation,
 	std::span<const std::byte> payload)
 {
+	if (operation == static_cast<std::uint16_t>(ConfigurationOperation::ReadJson) ||
+		operation == static_cast<std::uint16_t>(ConfigurationOperation::WriteJson))
+		return ConfigJson(operation, payload);
+
 	Decoder decoder(payload); std::string key;
 	if (!decoder.String(key) || key.size() > 256 || !IsValidUtf8(key) ||
 		(key.empty() && operation != static_cast<std::uint16_t>(ConfigurationOperation::List))) return {Status::InvalidArgument};
