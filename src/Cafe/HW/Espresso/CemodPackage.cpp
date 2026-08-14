@@ -161,9 +161,10 @@ bool ParseManifest(std::span<const std::byte> bytes, CemodManifest& manifest, st
 	manifest.apiVersion = document["api_version"].GetUint();
 	if (manifest.packageVersion == 1)
 	{
-		if (document.HasMember("payload") || document.HasMember("scope") || document.HasMember("permissions"))
+		if (document.HasMember("payload") || document.HasMember("scope") ||
+			document.HasMember("permissions") || document.HasMember("assets"))
 		{
-			error = "package_version 1 must not contain version 2 payload, scope, or permissions";
+			error = "package_version 1 must not contain payload, scope, permissions, or assets";
 			return false;
 		}
 		manifest.payload = {CemodPayloadFormat::CemodElf, "mod.elf"};
@@ -198,6 +199,33 @@ bool ParseManifest(std::span<const std::byte> bytes, CemodManifest& manifest, st
 			error = fmt::format("payload path '{}' does not match format '{}'", payloadPath, format);
 			return false;
 		}
+	}
+	if (document.HasMember("assets"))
+	{
+		if (manifest.packageVersion < 3 || !document["assets"].IsArray() ||
+			document["assets"].Empty() || document["assets"].Size() > 128)
+		{
+			error = "assets requires package_version 3 and a non-empty array of at most 128 paths";
+			return false;
+		}
+		std::set<std::string> assets;
+		for (const auto& value : document["assets"].GetArray())
+		{
+			if (!value.IsString())
+			{
+				error = "assets contains a non-string path";
+				return false;
+			}
+			std::string path(value.GetString(), value.GetStringLength());
+			const auto normalized = NormalizedEntryName(path);
+			if (path.size() > 248 || !normalized || *normalized != path ||
+				!assets.insert(path).second)
+			{
+				error = "assets contains an unsafe, non-canonical, or duplicate path";
+				return false;
+			}
+		}
+		manifest.assets.assign(assets.begin(), assets.end());
 	}
 	const std::string_view executionMode(document["execution_mode"].GetString(),
 		document["execution_mode"].GetStringLength());
@@ -745,7 +773,8 @@ std::optional<CemodPackage> CemodPackage::Inspect(const std::filesystem::path& p
 			error = "package contains a duplicate normalized entry name";
 			return std::nullopt;
 		}
-		if (!allowedEntries.contains(rawName))
+		const bool assetEntry = normalized->starts_with("assets/") && *normalized == rawName;
+		if (!allowedEntries.contains(rawName) && !assetEntry)
 		{
 			error = fmt::format("package contains unknown mandatory entry '{}'", rawName);
 			return std::nullopt;
@@ -774,6 +803,26 @@ std::optional<CemodPackage> CemodPackage::Inspect(const std::filesystem::path& p
 	{
 		return std::nullopt;
 	}
+	std::set<std::string> expectedAssetEntries;
+	for (const auto& path : result.manifest.assets)
+		expectedAssetEntries.emplace("assets/" + path);
+	for (const auto& [name, data] : entries)
+	{
+		if (!std::string_view(name).starts_with("assets/"))
+			continue;
+		if (!expectedAssetEntries.erase(name))
+		{
+			error = fmt::format("package contains undeclared asset entry '{}'", name);
+			return std::nullopt;
+		}
+		result.assets.push_back({name.substr(std::string_view("assets/").size()), data});
+	}
+	if (!expectedAssetEntries.empty())
+	{
+		error = fmt::format("package is missing declared asset entry '{}'", *expectedAssetEntries.begin());
+		return std::nullopt;
+	}
+	std::ranges::sort(result.assets, {}, &CemodAsset::path);
 	const auto elfEntry = entries.find("mod.elf");
 	const auto wpsEntry = entries.find("plugin.wps");
 	if ((elfEntry == entries.end()) == (wpsEntry == entries.end()))

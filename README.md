@@ -9,7 +9,7 @@ CemuExtendは、Wii Uエミュレーター[Cemu](https://github.com/cemu-project
 | `isolated` | CEX2サービスだけを使う第三者Mod | Mod専用PPCアドレス空間、W^X、CPU・memory quota |
 | `trusted_native` | Minecraft hook、GX2/Cafe API、ゲームmemoryを使うnative Mod | sandboxなし。同一タイトルのnative Modは相互に信頼 |
 
-どちらも`package_version: 1`、`api_version: 2`、`execution_mode`を持つ`manifest.json`が必須です。旧共有memory ABI 1は受け付けません。
+どちらも`package_version: 1`から`3`、`api_version: 2`、`execution_mode`を持つ`manifest.json`が必須です。旧共有memory ABI 1は受け付けません。
 
 ## CEX2
 
@@ -25,7 +25,7 @@ mapped VPAD入力では`MappedInputFlag::ReplacePhysical`を指定できます�
 
 ## `.cemod` package
 
-`.cemod`はZIP containerで、`manifest.json`と正確に1つのpayload、任意のEd25519公開鍵と署名を格納します。package version 1は従来どおりPPC32 big-endian ELF (`mod.elf`)を暗黙に選択します。package version 2は`payload` descriptorで`cemod_elf/mod.elf`または`wups/plugin.wps`を選択し、WUPSは`trusted_native`だけで許可します。署名対象は各entryの名前・長さ・SHA-256を固定順に連結したdigestです。
+`.cemod`はZIP containerで、`manifest.json`と正確に1つのpayload、任意のEd25519公開鍵と署名を格納します。package version 1は従来どおりPPC32 big-endian ELF (`mod.elf`)を暗黙に選択します。package version 2以降は`payload` descriptorで`cemod_elf/mod.elf`または`wups/plugin.wps`を選択し、WUPSは`trusted_native`だけで許可します。package version 3の任意`assets`配列は、同名の`assets/<path>` entryをhost temporary directoryの`<mod_id>/<path>`へ不足分だけ展開します。既存の通常fileは上書きしません。署名対象は各entryの名前・長さ・SHA-256を固定順に連結したdigestです。
 
 WPSはRPL section、CRC/FILEINFO、圧縮、symbol/relocation、`.wups.meta`、`.wups.hooks`、`.wups.load`を実行前にhost側で厳格にinspectionします。検証済みpluginは外部RPLとしてロードされ、owner/generation付きlifecycle、WUMS module graph/export、Cafe RPL/HLE優先のimport解決、transactional FunctionPatcher（named/fixed address、far trampoline、`real_*`、dynamic RPL追従）へ接続されます。Storage／Config等のbackend serviceと標準Aroma moduleの提供範囲を含む実装状況・明示的な非対応箇所・license境界は[`docs/wups-support-design.md`](docs/wups-support-design.md)に記載しています。
 

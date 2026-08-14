@@ -9,6 +9,7 @@
 #include "Cafe/OS/libs/cemuextend/Cex2Storage.h"
 
 #include "Cafe/HW/Espresso/ModExecutionContext.h"
+#include "Cafe/HW/Espresso/CemodAssetInstaller.h"
 #include "Cafe/HW/Espresso/WupsDynLoadInterception.h"
 #include "Cafe/HW/Espresso/CemodRuntime.h"
 #include "Cafe/HW/Espresso/PPCState.h"
@@ -449,6 +450,13 @@ namespace cemuextend_hle
 		{
 			if (runtime.Size() >= CemodRuntime::kMaximumModsPerTitle) break;
 			std::string error;
+			if (!CemodAssetInstaller::InstallMissing(item.package, error))
+			{
+				cemuLog_log(LogType::Force,
+					"CemuExtend failed to install assets for cemod '{}': {}",
+					_pathToUtf8(item.path), error);
+				continue;
+			}
 			const auto effective = item.package.IsTrustedNative() ? trustedPermissions : item.permissions;
 			if (!runtime.Load(std::move(item.package), effective, kCemodPermissionMask,
 				error, &services))

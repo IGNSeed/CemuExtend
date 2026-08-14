@@ -56,6 +56,12 @@ struct CemodNativePermissions
 	std::vector<std::string> modules;
 };
 
+struct CemodAsset
+{
+	std::string path;
+	std::vector<std::byte> bytes;
+};
+
 struct CemodManifest
 {
 	std::uint32_t packageVersion{};
@@ -74,6 +80,7 @@ struct CemodManifest
 	std::uint32_t timeMicrosecondsPerFrame{};
 	std::uint32_t mem2ExpansionBytes{};
 	std::string entrypoint;
+	std::vector<std::string> assets;
 };
 
 struct CemodPackage
@@ -88,6 +95,7 @@ struct CemodPackage
 	// Loaded ELF packages mirror payload here; new code must use PayloadBytes().
 	std::vector<std::byte> elf;
 	std::optional<WupsInspection> wups;
+	std::vector<CemodAsset> assets;
 	std::string principal;
 	std::uint64_t targetTitleId{};
 	bool signedPackage{};

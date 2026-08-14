@@ -1,4 +1,5 @@
 #include "Cafe/HW/Espresso/CemodPackage.h"
+#include "Cafe/HW/Espresso/CemodAssetInstaller.h"
 #include "Cafe/tests/WupsTestImage.h"
 
 #include <zip.h>
@@ -7,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -191,6 +193,17 @@ constexpr std::string_view kElfV2Manifest = R"({
  "mod_id":"org.example.native.v2",
  "title_ids":["0005000012345678"],
  "requested_permissions":["read"]
+})";
+
+constexpr std::string_view kElfV3AssetManifest = R"({
+ "package_version":3,
+ "api_version":2,
+ "execution_mode":"trusted_native",
+ "payload":{"format":"cemod_elf","path":"mod.elf"},
+ "mod_id":"org.example.assets",
+ "title_ids":["0005000012345678"],
+ "requested_permissions":["read"],
+ "assets":["images/effects/first.png","images/effects/second.png"]
 })";
 
 void WritePackage(const std::filesystem::path& path, bool unsafe,
@@ -390,6 +403,65 @@ void TestV3Mem2ExpansionRequest()
 	std::filesystem::remove(path);
 }
 
+std::vector<std::byte> ReadFile(const std::filesystem::path& path)
+{
+	std::ifstream input(path, std::ios::binary);
+	const std::vector<char> characters{std::istreambuf_iterator<char>(input),
+		std::istreambuf_iterator<char>()};
+	std::vector<std::byte> bytes(characters.size());
+	std::memcpy(bytes.data(), characters.data(), characters.size());
+	return bytes;
+}
+
+void TestV3AssetsAndMissingOnlyInstallation()
+{
+	const auto packagePath = PackagePath("v3-assets");
+	WriteEntries(packagePath, {
+		{"manifest.json", Bytes(kElfV3AssetManifest)},
+		{"mod.elf", TrustedElf()},
+		{"assets/images/effects/first.png", Bytes("first-package")},
+		{"assets/images/effects/second.png", Bytes("second-package")},
+	});
+	std::string error;
+	auto package = CemodPackage::Load(packagePath, 0x0005000012345678ULL, error);
+	CHECK(package.has_value());
+	CHECK(package->assets.size() == 2);
+	CHECK(package->assets[0].path == "images/effects/first.png");
+
+	const auto temporaryRoot = std::filesystem::temp_directory_path() /
+		"cemuextend-asset-installer-tests";
+	std::filesystem::remove_all(temporaryRoot);
+	CHECK(std::filesystem::create_directory(temporaryRoot));
+	CHECK(CemodAssetInstaller::InstallMissing(*package, temporaryRoot, error));
+	const auto destination = temporaryRoot / "org.example.assets" / "images" / "effects";
+	CHECK(ReadFile(destination / "first.png") == Bytes("first-package"));
+	CHECK(ReadFile(destination / "second.png") == Bytes("second-package"));
+
+	{
+		std::ofstream output(destination / "first.png", std::ios::binary | std::ios::trunc);
+		output << "preserved-existing";
+	}
+	CHECK(std::filesystem::remove(destination / "second.png"));
+	CHECK(CemodAssetInstaller::InstallMissing(*package, temporaryRoot, error));
+	CHECK(ReadFile(destination / "first.png") == Bytes("preserved-existing"));
+	CHECK(ReadFile(destination / "second.png") == Bytes("second-package"));
+
+	std::filesystem::remove_all(temporaryRoot);
+	std::filesystem::remove(packagePath);
+
+	const auto undeclaredPath = PackagePath("v3-assets-undeclared");
+	WriteEntries(undeclaredPath, {
+		{"manifest.json", Bytes(kElfV3AssetManifest)},
+		{"mod.elf", TrustedElf()},
+		{"assets/images/effects/first.png", Bytes("first-package")},
+		{"assets/images/effects/second.png", Bytes("second-package")},
+		{"assets/images/effects/third.png", Bytes("third-package")},
+	});
+	CHECK(!CemodPackage::Inspect(undeclaredPath, error));
+	CHECK(error.find("undeclared asset") != std::string::npos);
+	std::filesystem::remove(undeclaredPath);
+}
+
 void TestPayloadAndZipRejections()
 {
 	std::string error;
@@ -444,6 +516,22 @@ void TestPayloadAndZipRejections()
 
 int main()
 {
+	if (const auto* path = std::getenv("CEMUEXTEND_CEMOD_ASSET_CONFORMANCE_PACKAGE"))
+	{
+		std::string error;
+		const auto package = CemodPackage::Inspect(path, error);
+		if (!package) std::cerr << error << '\n';
+		CHECK(package.has_value());
+		CHECK(package->manifest.packageVersion == 3);
+		CHECK(!package->assets.empty());
+		CHECK(package->assets.size() == package->manifest.assets.size());
+		for (std::size_t index = 0; index < package->assets.size(); ++index)
+		{
+			CHECK(package->assets[index].path == package->manifest.assets[index]);
+			CHECK(!package->assets[index].bytes.empty());
+		}
+		return 0;
+	}
 	if (const auto* path = std::getenv("CEMUEXTEND_CEMOD_CONFORMANCE_PACKAGE"))
 	{
 		std::string error;
@@ -462,6 +550,7 @@ int main()
 	TestV2PayloadAndManifest();
 	TestV3PluginManagementPermission();
 	TestV3Mem2ExpansionRequest();
+	TestV3AssetsAndMissingOnlyInstallation();
 	TestPayloadAndZipRejections();
 	return 0;
 }

@@ -72,6 +72,8 @@ add_library(CemuCafe
   HW/Espresso/PPCState.h
 	HW/Espresso/GuestExecutionQuiescence.cpp
 	HW/Espresso/GuestExecutionQuiescence.h
+	HW/Espresso/CemodAssetInstaller.cpp
+	HW/Espresso/CemodAssetInstaller.h
   HW/Espresso/CemodPackage.cpp
   HW/Espresso/CemodPackage.h
   HW/Espresso/CemodRuntime.cpp
@@ -788,6 +790,7 @@ if(BUILD_TESTING)
 	add_test(NAME cex2_host_tests COMMAND cex2_host_tests)
 
 	add_executable(cemod_package_tests
+		HW/Espresso/CemodAssetInstaller.cpp
 		HW/Espresso/CemodPackage.cpp
 		HW/Espresso/WupsBinary.cpp
 		tests/CemodPackageTests.cpp
